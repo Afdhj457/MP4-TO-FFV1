@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- 已添加禁止缩放的配置 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>MP4 · 转 FFV1 (无损编码) · 预览 + 下载</title>
   <style>
     * {
@@ -333,9 +334,10 @@
   </div>
 </div>
 
-<!-- 引入 FFmpeg.wasm 核心 (用于演示，实际使用需要加载多线程/单线程版本) -->
-<!-- 注意：这里使用 @ffmpeg/ffmpeg 4.x 版本，通过 CDN 引入。由于浏览器安全限制，实际转换需要较长时间，但完全可运行。 -->
+<!-- 引入 FFmpeg 0.12.x (UMD 版本) 和 工具库 -->
 <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/util.min.js"></script>
+
 <script>
   (async function() {
     // ---------- DOM 元素 ----------
@@ -353,15 +355,15 @@
 
     // ---------- 状态 ----------
     let currentFile = null;          // 原始 MP4 File 对象
-    let ffmpeg = null;              // FFmpeg 实例
-    let ffmpegLoaded = false;       // 是否已加载
-    let convertedBlob = null;       // 转换后的 blob (MKV)
+    let ffmpeg = null;               // FFmpeg 实例
+    let ffmpegLoaded = false;        // 是否已加载
+    let convertedBlob = null;        // 转换后的 blob (MKV)
     let isConverting = false;
 
     // ---------- 工具函数 ----------
     function setStatus(text, type = 'info') {
       statusMessage.textContent = text;
-      statusMessage.className = 'status'; // 重置
+      statusMessage.className = 'status';
       if (type === 'error') statusMessage.classList.add('error');
       if (type === 'success') statusMessage.classList.add('success');
     }
@@ -374,13 +376,15 @@
       resetBtn.disabled = (!currentFile && !convertedBlob) || isConverting;
       // 下载按钮: 有转换结果
       downloadBtn.disabled = !convertedBlob;
+      
+      // 如果正在进行转换，禁用文件选择框，防止误操作
+      fileInput.disabled = isConverting;
     }
 
-    // 清理预览和文件状态 (不清理ffmpeg)
+    // 清理预览和文件状态
     function resetFileState(keepStatus = false) {
-      if (isConverting) return; // 转换中不允许重置
+      if (isConverting) return;
 
-      // 释放 video src
       if (videoPreview.src) {
         URL.revokeObjectURL(videoPreview.src);
         videoPreview.src = '';
@@ -391,37 +395,44 @@
       fileLabelText.textContent = '选择 MP4 文件';
       fileInput.value = '';
 
-      // 清理转换结果
       if (convertedBlob) {
-        // 如果有下载链接也清理 (没有实际链接，blob 由 URL 管理)
         convertedBlob = null;
       }
 
       currentFile = null;
 
-      // 如果ffmpeg已经加载，无需重置
       if (!keepStatus) {
         setStatus('等待上传 MP4 文件…', 'info');
       }
       updateButtonState();
     }
 
-    // 加载 FFmpeg (只加载一次)
+    // 加载 FFmpeg (只加载一次) - 使用 0.12.x 的最新 API
     async function ensureFFmpegLoaded() {
       if (ffmpegLoaded) return true;
       if (isConverting) return false;
 
       try {
-        setStatus('加载 FFmpeg 核心 (WebAssembly) …', 'info');
-        // 使用单线程版本，兼容性更好
-        const { createFFmpeg, fetchFile } = FFmpeg;
-        ffmpeg = createFFmpeg({
-          log: true, // 减少控制台噪音可设为 false
-          corePath: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js',
+        setStatus('加载 FFmpeg 核心 (WebAssembly) … 请稍候', 'info');
+        
+        // 从 UMD 全局变量中获取类和方法
+        const { FFmpeg } = FFmpegWASM;
+        const { toBlobURL } = FFmpegUtil;
+        
+        ffmpeg = new FFmpeg();
+        
+        // 拦截日志，可选择性输出
+        ffmpeg.on('log', ({ message }) => {
+          console.log('[FFmpeg]', message);
         });
 
-        // 加载核心
-        await ffmpeg.load();
+        // 指定核心的 CDN 地址，并使用 toBlobURL 解决跨域问题
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+        await ffmpeg.load({
+          coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+          wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+        });
+
         ffmpegLoaded = true;
         setStatus('FFmpeg 就绪，可以开始转换', 'success');
         updateButtonState();
@@ -437,17 +448,17 @@
 
     // ---------- 文件选择 ----------
     fileInput.addEventListener('change', async (e) => {
+      if (isConverting) return; // 转换中禁止选择
+
       const file = e.target.files?.[0];
       if (!file) return;
 
-      // 简单验证 MP4 类型 (有些文件type可能为空)
       if (!file.type.includes('mp4') && !file.name.toLowerCase().endsWith('.mp4')) {
         setStatus('请选择有效的 MP4 文件', 'error');
         fileInput.value = '';
         return;
       }
 
-      // 重置之前的状态 (保留 ffmpeg 加载状态)
       resetFileState(true);
       currentFile = file;
 
@@ -460,21 +471,17 @@
       videoPreview.src = videoUrl;
       videoPreview.style.display = 'block';
       previewPlaceholder.style.display = 'none';
-
-      // 确保视频元数据加载后可以播放
       videoPreview.load();
 
       setStatus(`已选择: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`, 'info');
 
-      // 如果 ffmpeg 未加载，则开始加载 (不阻塞预览)
+      // 异步加载 FFmpeg
       if (!ffmpegLoaded) {
-        // 异步加载，不等待
         ensureFFmpegLoaded().catch(console.warn);
       } else {
         updateButtonState();
       }
 
-      // 如果有之前转换的结果，重置
       if (convertedBlob) {
         convertedBlob = null;
         updateButtonState();
@@ -493,7 +500,6 @@
       }
       if (isConverting) return;
 
-      // 先清理之前的结果
       if (convertedBlob) {
         convertedBlob = null;
         updateButtonState();
@@ -506,51 +512,40 @@
 
       try {
         setStatus('开始转换：正在读取文件…', 'info');
-        const { fetchFile } = FFmpeg;  // 已经解构，但这里是局部
-        // 注意: fetchFile 在 FFmpeg 对象上，上面解构过了
-        // 但是之前解构是在 ensureFFmpegLoaded 函数内，全局使用需要重新获取
-        // 为了避免混乱，直接从全局 FFmpeg 获取 fetchFile
-        const fileData = await FFmpeg.fetchFile(currentFile);
+        // 0.12.x 使用 fetchFile
+        const { fetchFile } = FFmpegWASM;
+        const fileData = await fetchFile(currentFile);
 
         const inputFileName = 'input.mp4';
         const outputFileName = 'output.mkv';
 
         setStatus('正在写入虚拟文件系统…', 'info');
-        ffmpeg.FS('writeFile', inputFileName, fileData);
+        await ffmpeg.writeFile(inputFileName, fileData);
 
-        setStatus('FFV1 编码中 (无损，可能较慢，请耐心等待)…', 'info');
+        setStatus('FFV1 编码中 (无损压缩，文件可能很大，请耐心等待)…', 'info');
 
-        // 运行 FFmpeg 命令:
-        // -i input.mp4 输入
-        // -c:v ffv1  视频编码 FFV1
-        // -level 3   常用级别，兼容性好 (可选)
-        // -coder 1   使用 range coder (可选)
-        // -context 1  (可选)
-        // -g 1       每帧关键帧，无损且便于剪辑 (增大文件体积)
-        // -c:a copy  音频直接复制 (MP4中通常是AAC，MKV支持)
-        // -f matroska 输出格式
-        // 为了减小体积，可以不加 -g 1，但无损且预览友好我们保留默认
-        // 注意: FFV1 默认为无损，不需要额外参数
-        await ffmpeg.run(
+        // 执行 FFmpeg 命令
+        await ffmpeg.exec([
           '-i', inputFileName,
           '-c:v', 'ffv1',
           '-level', '3',
           '-coder', '1',
           '-context', '1',
-          '-g', '1',           // 每帧关键帧，保证无损帧精确，但体积大
-          '-c:a', 'copy',      // 音频直接复制 (如果源是AAC，MKV封装没问题)
+          '-g', '1',
+          '-c:a', 'copy',
           '-f', 'matroska',
           outputFileName
-        );
+        ]);
 
         setStatus('转换完成，正在读取输出文件…', 'info');
-        const outputData = ffmpeg.FS('readFile', outputFileName);
-        // 创建 Blob
+        const outputData = await ffmpeg.readFile(outputFileName);
+        
+        // 使用 Blob 包装
         convertedBlob = new Blob([outputData.buffer], { type: 'video/x-matroska' });
 
         // 清理虚拟文件
-        ffmpeg.FS('unlink', inputFileName);
-        ffmpeg.FS('unlink', outputFileName);
+        await ffmpeg.deleteFile(inputFileName);
+        await ffmpeg.deleteFile(outputFileName);
 
         setStatus(`✅ 转换成功！FFV1 文件已准备好 (${(convertedBlob.size / (1024 * 1024)).toFixed(2)} MB)`, 'success');
         updateButtonState();
@@ -558,10 +553,9 @@
       } catch (err) {
         console.error('转换失败:', err);
         setStatus(`❌ 转换失败: ${err.message || '请查看控制台了解更多'}`, 'error');
-        // 尝试清理虚拟文件 (可能未创建)
         try {
-          if (ffmpeg.FS('readdir', '/').includes('input.mp4')) ffmpeg.FS('unlink', 'input.mp4');
-          if (ffmpeg.FS('readdir', '/').includes('output.mkv')) ffmpeg.FS('unlink', 'output.mkv');
+          await ffmpeg.deleteFile('input.mp4');
+          await ffmpeg.deleteFile('output.mkv');
         } catch (e) {}
       } finally {
         isConverting = false;
@@ -580,13 +574,11 @@
       const url = URL.createObjectURL(convertedBlob);
       const a = document.createElement('a');
       a.href = url;
-      // 命名: 原文件名 + _ffv1.mkv
       const baseName = currentFile ? currentFile.name.replace(/\.[^/.]+$/, '') : 'video';
       a.download = `${baseName}_ffv1.mkv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      // 延迟释放 URL
       setTimeout(() => URL.revokeObjectURL(url), 1500);
       setStatus('下载已开始', 'success');
     }
@@ -597,14 +589,10 @@
         setStatus('转换中，请等待完成后再重置', 'error');
         return;
       }
-      // 清理转换结果
       if (convertedBlob) {
         convertedBlob = null;
       }
-      // 重置文件状态 (会清理预览等)
       resetFileState(false);
-
-      // 如果之前有错误状态，重置为等待
       setStatus('等待上传 MP4 文件…', 'info');
       updateButtonState();
     }
@@ -614,93 +602,8 @@
     resetBtn.addEventListener('click', resetAll);
     downloadBtn.addEventListener('click', downloadConverted);
 
-    // 初始状态：禁用按钮
+    // 初始状态
     updateButtonState();
-
-    // 预加载 FFmpeg 核心（在后台加载，不阻塞界面），但为了避免干扰，选择在用户选择文件后触发。
-    // 也可以在这里就触发，不过有些浏览器会警告。我们选择在文件选择时加载。
-    // 但为了让体验更顺畅，可以在页面加载后延迟加载 (避免占用带宽影响预览)
-    // 采用用户首次点击选择文件时再加载，因为我们在change事件中调用了 ensureFFmpegLoaded
-    // 如果用户先点击转换按钮但还没选择文件，会提示。
-
-    // 但为了确保用户在选择文件后能快速就绪，我们已经在 change 事件里调用 ensureFFmpegLoaded
-    // 但用户可能在加载完成前点击转换，这时会等待加载。没问题。
-
-    // 额外优化: 如果用户直接点击转换 (但按钮是禁用的，所以没问题)
-
-    // 修复: 如果用户文件选择后 ffmpeg 还在加载，转换按钮依然禁用，直到加载完成
-    // 这就需要 ensureFFmpegLoaded 更新按钮状态。
-    // 我们在 ensureFFmpegLoaded 的 finally 或成功里调用 updateButtonState
-
-    // 但 ensureFFmpegLoaded 内部调用了 updateButtonState。但可能由于闭包 currentFile 更新不及时？
-    // 没问题，updateButtonState 每次都会读取最新 currentFile。
-
-    // 但需注意: 如果用户快速选文件，然后 ffmpeg 加载完成前又选了另一个文件，
-    // 有可能导致加载完成时 currentFile 已经改变。没问题， updateButtonState 会基于当前文件。
-    // 也可以防止在加载过程中进行转换 (按钮禁用)。
-
-    // 修复 reset 时如果 isConverting 为 true 不允许重置，上面已处理。
-
-    // 另外，如果 ffmpeg 加载失败，也应该重置 ffmpegLoaded 状态
-    // 已处理。
-
-    // 修补: 在 resetFileState 中如果正在转换不允许调用，上面的 resetAll 已经判断了isConverting
-    // 但用户可以通过选择新文件触发 resetFileState (在change事件里) 而当前正在转换 -> 我们需要阻止
-    // 修改 change 事件：如果正在转换，忽略文件选择
-    const originalChangeHandler = fileInput.onchange;
-    fileInput.addEventListener('change', (e) => {
-      if (isConverting) {
-        alert('转换正在进行中，请等待完成后再选择新文件');
-        fileInput.value = '';
-        return;
-      }
-      // 其余逻辑已在之前的事件监听中处理
-    }, true); // 捕获阶段，但这样会执行两次？因为之前已经 addEventListener。
-    // 更好的方式：修改已有的事件监听，在开头检查 isConverting
-    // 由于我们无法轻易移除之前的监听，我们在这里使用捕获，并且阻止后续监听？ 
-    // 其实之前的监听已经绑定，我们可以在之前监听函数内部加检查。
-    // 重构：直接修改上面的 change 处理函数，在开头添加 isConverting 检查。但代码已写，我们重新绑定新监听并移除旧的? 
-    // 简化：我们直接给 fileInput 添加一个新监听，在捕获阶段阻止。但是原来监听仍然会执行。
-    // 更简单：修改文件选择处理逻辑，在旧的处理开头加入 isConverting 判断。但由于代码位置，我们重新整理。
-
-    // 为了保持整洁，移除之前绑定的 change 监听，重新绑定一个。但使用 addEventListener 无法轻松移除匿名函数。
-    // 因此我们采用一个技巧：在旧的 change 监听中已经无法修改，那么我们加一个全局标志，或者使用新的事件监听并阻止默认行为？
-    // 不，我们重新整理代码：在文件选择时，先检查 isConverting，如果是则忽略。
-    // 我们可以将之前的 change 监听改写为命名函数，然后移除并重新绑定。由于这段脚本是立即执行，我们可以这样做：
-
-    // 但为了不出错，我直接在文件选择处理逻辑最前面加入 isConverting 检查 (通过 setTimeout 无法解决)。
-    // 实际中，我们可以加一个判断，但由于事件监听顺序，我们可以在这里覆盖。
-    // 我们使用另一种方法：监听 change 事件，并检查 isConverting，如果为 true，则恢复文件输入的值并返回。
-    // 然后移除之前绑定的监听？但我们不知道引用。我们可以这样：
-    // 我们重新绑定一个新的 change 监听，并且在其中处理所有逻辑，同时移除之前的监听（通过克隆节点？）
-    // 太复杂了。考虑到 isConverting 时用户无法点击重置和转换，但文件选择框可以点，我们就在新的监听中阻止。
-
-    // 由于这段代码是最终版本，我决定将之前绑定的 change 监听移到下面统一管理，但为时已晚。
-    // 快速修复：在现有 change 监听的开头加上 if (isConverting) { fileInput.value = ''; return; }
-    // 可是我们无法修改已绑定的函数。没关系，我重新绑定一个并移除旧的？ 可以通过 fileInput 的 onchange 属性？ 之前是用 addEventListener，所以 onchange 还是 null。
-    // 可以设置 fileInput.onchange = null 然后重新添加？ 但会移除所有监听。可以接受，因为我们知道只有这一个监听。
-    // 我们执行: fileInput.onchange = null; 然后重新添加监听。
-
-    // 移除之前绑定的 change 监听 (通过将 onchange 置 null 并重新绑定)
-    // 注意: 之前 addEventListener 无法通过 onchange 移除，但可以继续保留，但我们重新绑定时会重复。
-    // 为了干净，我们跳过，用户一般不会在转换中选择文件，因为转换时按钮已禁用，但文件选择仍可点，是一个边缘情况。
-    // 暂时忽略，因为转换通常较快 (但FFV1可能较慢)。我们可以通过禁用文件选择来实现: convert时禁用 fileInput。
-    // 更好的方案：在转换开始时，禁用 fileInput 和 resetBtn，转换结束后恢复。
-    // 我们加上这个逻辑。
-
-    // 修补：在 convertToFFV1 开始时，禁用 fileInput
-    const originalConvert = convertToFFV1;
-    // 不重写函数，我们直接在convertToFFV1内部修改 (因为已写)。但由于函数已定义，我们在此补充：使用事件监听或者改变函数引用。
-    // 最简单：在开始转换时设置 fileInput.disabled = true; 结束恢复。
-    // 我们在转换函数内部加上即可。但无法直接编辑上面的函数了？ 可以，我们在下面用新函数覆盖。
-    // 没问题，因为JS函数提升，我们可以重新定义。
-
-    // 但为了最小改动，我们就在下面附加对 fileInput 的禁用控制。
-
-    // 最终，我们保持简单，不处理这个边缘情况，因为正常用户不会在转换中选文件，且转换中界面有提示。
-
-    // 初始化完成
-    console.log('MP4 → FFV1 工具已就绪');
   })();
 </script>
 </body>
